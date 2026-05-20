@@ -1,10 +1,12 @@
 import 'package:firebase_auth/firebase_auth.dart';
 import 'package:cloud_firestore/cloud_firestore.dart';
+import 'package:cloud_functions/cloud_functions.dart';
 import 'package:google_sign_in/google_sign_in.dart';
 
 class AuthService {
   final FirebaseAuth _auth = FirebaseAuth.instance;
   final FirebaseFirestore _firestore = FirebaseFirestore.instance;
+  final FirebaseFunctions _functions = FirebaseFunctions.instance;
   final GoogleSignIn _googleSignIn = GoogleSignIn();
 
   // Get current user
@@ -12,6 +14,18 @@ class AuthService {
 
   // Auth state changes stream
   Stream<User?> get authStateChanges => _auth.authStateChanges();
+
+  bool get currentUserUsesPassword {
+    final user = _auth.currentUser;
+    if (user == null) return false;
+    return user.providerData.any((info) => info.providerId == 'password');
+  }
+
+  bool get currentUserUsesGoogle {
+    final user = _auth.currentUser;
+    if (user == null) return false;
+    return user.providerData.any((info) => info.providerId == 'google.com');
+  }
 
   // Sign in with Google
   Future<UserCredential> signInWithGoogle() async {
@@ -180,6 +194,109 @@ class AuthService {
     await Future.wait([_auth.signOut(), _googleSignIn.signOut()]);
   }
 
+  Future<void> deleteCurrentAccount({String? password}) async {
+    final user = _auth.currentUser;
+    if (user == null) throw Exception("No user signed in");
+
+    try {
+      await _reauthenticateForAccountDeletion(user, password: password);
+      await deleteReauthenticatedCurrentAccount();
+    } on FirebaseAuthException catch (e) {
+      throw _handleAccountDeletionException(e);
+    }
+  }
+
+  Future<void> reauthenticateForAccountDeletion({String? password}) async {
+    final user = _auth.currentUser;
+    if (user == null) throw Exception("No user signed in");
+
+    try {
+      await _reauthenticateForAccountDeletion(user, password: password);
+    } on FirebaseAuthException catch (e) {
+      throw _handleAccountDeletionException(e);
+    }
+  }
+
+  Future<void> deleteReauthenticatedCurrentAccount() async {
+    final user = _auth.currentUser;
+    if (user == null) throw Exception("No user signed in");
+
+    try {
+      await user.getIdToken(true);
+      await _functions.httpsCallable('deleteMyAccount').call<void>();
+      await _signOutLocal();
+    } on FirebaseAuthException catch (e) {
+      throw _handleAccountDeletionException(e);
+    } on FirebaseFunctionsException catch (e) {
+      throw _handleAccountDeletionFunctionException(e);
+    }
+  }
+
+  Future<void> _signOutLocal() async {
+    try {
+      await _auth.signOut();
+    } catch (_) {}
+    try {
+      await _googleSignIn.signOut();
+    } catch (_) {}
+  }
+
+  Future<void> _reauthenticateForAccountDeletion(
+    User user, {
+    String? password,
+  }) async {
+    if (user.isAnonymous) return;
+
+    final providers = user.providerData.map((info) => info.providerId).toSet();
+
+    if (providers.contains('password')) {
+      final email = user.email;
+      if (email == null || email.isEmpty) {
+        throw FirebaseAuthException(
+          code: 'missing-email',
+          message: 'This account has no email address.',
+        );
+      }
+      if (password == null || password.isEmpty) {
+        throw FirebaseAuthException(
+          code: 'missing-password',
+          message: 'Password is required.',
+        );
+      }
+
+      final credential = EmailAuthProvider.credential(
+        email: email,
+        password: password,
+      );
+      await user.reauthenticateWithCredential(credential);
+      return;
+    }
+
+    if (providers.contains('google.com')) {
+      final googleUser = await _googleSignIn.signIn();
+      if (googleUser == null) {
+        throw FirebaseAuthException(
+          code: 'user-cancelled',
+          message: 'Google sign-in was cancelled.',
+        );
+      }
+
+      final googleAuth = await googleUser.authentication;
+      final credential = GoogleAuthProvider.credential(
+        accessToken: googleAuth.accessToken,
+        idToken: googleAuth.idToken,
+      );
+      await user.reauthenticateWithCredential(credential);
+      return;
+    }
+
+    throw FirebaseAuthException(
+      code: 'unsupported-provider',
+      message:
+          'This sign-in method cannot be deleted from the app. Please sign in again with a supported provider and try again.',
+    );
+  }
+
   // Send password reset email
   Future<void> sendPasswordResetEmail(String email) async {
     try {
@@ -208,6 +325,40 @@ class AuthService {
         return 'Too many attempts. Please try again later.';
       default:
         return 'Authentication failed. Please try again.';
+    }
+  }
+
+  String _handleAccountDeletionException(FirebaseAuthException e) {
+    switch (e.code) {
+      case 'wrong-password':
+      case 'invalid-credential':
+        return 'The password you entered is incorrect.';
+      case 'requires-recent-login':
+        return 'Please log out, sign in again, and then delete your profile.';
+      case 'user-cancelled':
+        return 'Account deletion was cancelled.';
+      case 'missing-password':
+        return 'Enter your password to delete this profile.';
+      case 'missing-email':
+        return 'This account has no email address.';
+      case 'user-mismatch':
+        return 'The selected sign-in account does not match this profile.';
+      case 'unsupported-provider':
+        return e.message ?? 'This sign-in method is not supported.';
+      default:
+        return 'Could not delete this profile. Please try again.';
+    }
+  }
+
+  String _handleAccountDeletionFunctionException(FirebaseFunctionsException e) {
+    switch (e.code) {
+      case 'unauthenticated':
+        return 'Please sign in again before deleting your profile.';
+      case 'failed-precondition':
+        return e.message ??
+            'Please sign in again before deleting your profile.';
+      default:
+        return e.message ?? 'Could not delete this profile. Please try again.';
     }
   }
 

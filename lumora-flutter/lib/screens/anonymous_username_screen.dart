@@ -1,8 +1,6 @@
 import 'dart:async';
 import 'package:flutter/material.dart';
 import 'package:lumora_flutter/services/auth_service.dart';
-import 'package:lumora_flutter/screens/main_shell.dart';
-import 'package:lumora_flutter/screens/login_screen.dart';
 
 // Design constants
 const _kNavy = Color(0xFF1A3A5C);
@@ -108,12 +106,6 @@ class _AnonymousUsernameScreenState extends State<AnonymousUsernameScreen> {
         uid: uid,
         username: _usernameController.text.trim(),
       );
-      if (mounted) {
-        Navigator.of(context).pushAndRemoveUntil(
-          MaterialPageRoute(builder: (_) => const MainShell()),
-          (route) => false,
-        );
-      }
     } catch (e) {
       if (mounted) {
         ScaffoldMessenger.of(context).showSnackBar(
@@ -155,14 +147,6 @@ class _AnonymousUsernameScreenState extends State<AnonymousUsernameScreen> {
                     child: GestureDetector(
                       onTap: () async {
                         await _authService.signOut();
-                        if (context.mounted) {
-                          Navigator.of(context).pushAndRemoveUntil(
-                            MaterialPageRoute(
-                              builder: (_) => const LoginScreen(),
-                            ),
-                            (route) => false,
-                          );
-                        }
                       },
                       child: Container(
                         padding: const EdgeInsets.all(8),
